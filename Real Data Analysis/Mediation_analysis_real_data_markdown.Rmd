@@ -1,0 +1,1542 @@
+---
+title: "Mediation_analysis_real_data"
+author: "Lyu Qiuran"
+date: '2023-05-05'
+output: html_document
+---
+# Metabolic mediators of BMI on cardiovascular diseases 
+
+## X: BMI
+## M: Blood pressure (SBP DBP), LDL HDL Cholesterol,  Glucose level, Diabetes
+## Y: cardiovascular diseases
+## Results: mediating effect $\tau=\tau_X\tau_Y$ with calibrated p-values. 
+
+Reported format: $\hat\theta$,$\hat\tau_X$, $\hat\tau_Y$, $\hat\tau$(mediating effect), p-value, $\hat{\theta+\tau}$(total effects).
+
+### Methods:1.our proposed mathod with rerandomization 2. MVMR package to estimate $\theta$ and use snps only associated with $X$ to estimate $\theta+\tau$. We have to report the standard error constructed by ourselves. 3. 2step MR: use snps only associated with $M$ and snps associated with $X$.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list = ls())
+```
+
+
+## step 2: pick snps and conduct mediation analysis
+
+```{r,echo=FALSE,include = FALSE}
+
+require(TwoSampleMR)
+require(data.table)
+require(dplyr)
+require(MVMR)
+#setwd("F:\\Filtered_GWAS\\")
+MR_MVMRbase <- function(exposure.id, mediator.id, outcome.id, overlap.mat, sel.pthr = 5e-8, refpanel=NULL,indep.method = "clumping", rerand = FALSE)  {
+   
+    tmpdir = paste0("C:\\Users\\25110\\Desktop\\tmp\\mvmr2_",exposure.id,"\\")
+    dir.create(tmpdir)
+     med_tmpdir = paste0("C:\\Users\\25110\\Desktop\\tmp\\mvmr2_",mediator.id,"\\")
+    dir.create(med_tmpdir)
+    #exposure.id = "pheno10"
+    #outcome.id = "AD_Jansene"
+    if(is.null(refpanel)) {
+        refpanel = "C:\\Users\\25110\\Desktop\\tmp\\1000G_Phase1_plinkfiles\\1000G_plinkfiles\\1000G.mac5eur."
+        warning("This is just for local use")
+    }
+    # rerandomization
+    etamean = 0.5
+    #sel.pthr = 5e-5
+    #proxies = "FALSE"
+    
+    # read it through gwasvcf
+    dat = fread(paste("E:\\Filtered_GWAS\\",exposure.id,"_GWAS.txt",sep=""))
+    dat = as.data.frame(dat)
+    mediatordat = fread(paste("E:\\Filtered_GWAS\\",mediator.id,"_GWAS.txt",sep=""))
+    mediatordat = as.data.frame(mediatordat)
+    outcomedat = fread(paste("E:\\Filtered_GWAS\\",outcome.id,"_GWAS.txt",sep=""))
+    outcomedat = as.data.frame(outcomedat)
+    
+  
+    #only consider SNPs in three dataset
+    SNPset=intersect(intersect(dat$SNP, outcomedat$SNP),mediatordat$SNP)
+    dat = dat[dat$SNP %in% SNPset,]
+    mediatordat =  mediatordat[ mediatordat$SNP %in% SNPset,]
+    outcomedat = outcomedat[outcomedat$SNP %in% SNPset,]
+    MR_datall = list()
+    nx=median(dat$SE)
+    nm=median(mediatordat$SE)
+    
+    set.seed(100)
+    #####################################################
+    # Step 1.0: get the indepdent SNPs
+    #####################################################
+    
+    pruned = NULL
+   
+    cat("Finish reading exposure data: ", exposure.id,"\n")
+    cat("Finish reading mediator data: ", mediator.id,"\n")
+    cat("Finish reading outcome data: ", outcome.id,"\n")
+    
+    for(chr.id in 1:22) {
+      
+        tmp.snp.file = paste0(tmpdir,exposure.id,"_CHR",chr.id,"txt")
+        #"C:\\Users\\25110\\Desktop\\tmp\\exposure.id\\exposure.id_CHR1.text"
+        tmp = dat %>% filter(CHR==chr.id)
+        
+        W = rnorm(dim(tmp)[1], 0, etamean)
+        
+        
+        med_tmp.snp.file =paste0(tmpdir,mediator.id,"_CHR",chr.id,"txt")
+        #"C:\\Users\\25110\\Desktop\\tmp\\exposure.id\\exposure.id_CHR1.text"
+        med_tmp = mediatordat %>% filter(CHR==chr.id)
+        
+         W2 = rnorm(dim(med_tmp)[1], 0, etamean)
+        
+        # Step 2: Select significant SNPs:
+        C_sel = qnorm(sel.pthr/2,lower.tail = FALSE) #* sqrt(1 + eta^2)
+        
+        if(rerand) { # recalculated p value when rerandomized
+            tmpP = tmp[,"BETA"]/tmp[,"SE"] + W
+            tmpP2 = pnorm(abs(tmpP/sqrt(1 + etamean^2)),lower.tail = FALSE) * 2
+            med_tmpP = med_tmp[,"BETA"]/med_tmp[,"SE"] + W2
+            med_tmpP2 = pnorm(abs(med_tmpP/sqrt(1 + etamean^2)),lower.tail = FALSE) * 2
+            
+        } else {
+            # use the original ones
+            tmpP = tmp[,"BETA"]/tmp[,"SE"]
+            tmpP2 = tmp[,"P"]
+            med_tmpP = med_tmp[,"BETA"]/med_tmp[,"SE"]
+            med_tmpP2 = med_tmp[,"P"]
+        }
+        
+        
+        ind_filter = which(abs(tmpP) >= C_sel)
+        ind_filter2 = which(abs(med_tmpP) >= C_sel)
+       
+        tmpSNP=tmp[ind_filter,"SNP"]
+        med_SNP=med_tmp[ind_filter2,"SNP"]
+        union_SNP=union(tmpSNP,med_SNP)
+        if(length(ind_filter)==0 & length(ind_filter2)==0) {
+            next
+        }
+         
+        # select the SNPs combination of two sets indfilter 1 and indfilter 2
+        ind_filter_tmp=which(tmp$SNP%in%union_SNP)
+        ind_filter_med=which(med_tmp$SNP%in%union_SNP)
+        tmp = tmp[ind_filter_tmp,]
+        tmp = as.data.frame(tmp)
+        med_tmp = med_tmp[ind_filter_med,]
+        med_tmp = as.data.frame(med_tmp)
+        tmpSE = tmp[,"SE"]
+        med_tmpSE=med_tmp[,"SE"]
+        # change pval for sigma-based clumping
+           if(indep.method == "clumping") {
+                tmp$P = tmpP2[ind_filter_tmp]
+            } else {
+              tmpSE=tmpSE^2/mean(tmpSE^2)
+                tmp$P = 1/(1 + exp(-tmpSE)) - 0.5
+            }
+      
+            if(indep.method == "clumping") {
+                med_tmp$P = med_tmpP2[ind_filter_med]
+            } else {
+               med_tmpSE=med_tmpSE^2/mean(med_tmpSE^2)
+                med_tmp$P = 1/(1 + exp(-med_tmpSE)) - 0.5
+            }
+        med_tmp=med_tmp[match( tmp$SNP,med_tmp$SNP), ] 
+        tmp$BETAM=med_tmp$BETA
+        tmp$SEM=med_tmp$SE
+        tmp$PM=med_tmp$P
+        tmp$ZM=med_tmp$Z
+        tmp_new= mutate(tmp, index1 = PM<P)
+        # sigmahat in M has smaller value 
+        tmp_M=tmp_new[tmp_new$index1==TRUE,c("CHR","POS","SNP","A1","A2","ZM","BETAM","SEM","PM","N")]
+          tmp_X=tmp_new[tmp_new$index1==FALSE,c("CHR","POS","SNP","A1","A2","Z","BETA","SE","P","N")]
+          colnames(tmp_M)=c("CHR","POS","SNP","A1","A2","Z","BETA","SE","P","N")
+          #same list but with p to be min(px,pm)
+          ref_all=rbind(tmp_M,tmp_X)
+          ref_all=ref_all[match( med_tmp$SNP,ref_all$SNP), ] 
+          cat("Combind Exposure and Mediator with smallest p-value.\n")
+        tmp.ssfile = paste0(tmpdir,exposure.id,"_ss_CHR",chr.id,".txt")
+        
+        write.table(ref_all,file = tmp.ssfile,quote=FALSE,row.names=FALSE,col.names=TRUE)
+        
+        SNP_list = ref_all$SNP
+        
+        write.table(SNP_list,file = tmp.snp.file,quote=FALSE,row.names=FALSE,col.names=FALSE)
+        
+        system(paste0("C:\\Users\\25110\\Desktop\\tmp\\plink --silent --bfile ",refpanel,chr.id,  " --chr ", chr.id," --extract ", tmp.snp.file," --make-bed --out ",tmpdir,exposure.id,"_CHR",chr.id))
+      
+
+        if(indep.method == "prunning.org") {
+            command = paste0("C:\\Users\\25110\\Desktop\\tmp\\plink --silent --bfile ",tmpdir,exposure.id,"_CHR",chr.id, "  --indep-pairwise 10000 100 0.001 --out ",tmpdir,exposure.id,"_CHR",chr.id)
+            system(command)
+            
+            pruned.file=paste0(tmpdir,exposure.id,"_CHR",chr.id,".prune.in")
+            
+            } else {
+            #clumping
+            command <- paste("C:\\Users\\25110\\Desktop\\tmp\\plink --silent --bfile ",tmpdir,exposure.id,"_CHR",chr.id, " --clump ", tmp.ssfile, "  --clump-p1 1 --clump-kb 10000 --clump-r2 0.001  --clump-snp-field SNP --clump-field P --out ", tmpdir,exposure.id,"_CHR",chr.id, sep = "")
+            system(command)
+            pruned.file = paste(tmpdir,exposure.id,"_CHR",chr.id, ".clumped", sep = "")
+            
+        }
+#pruned for exposure and pruned for mediator should be the same.
+        if(file.exists(pruned.file)) {
+           
+            if(indep.method == "prunning.org") {
+                pruned.snp = fread(pruned.file,header=FALSE)
+                pruned.snp = as.data.frame(pruned.snp)
+                pruned.snp = pruned.snp[,1]
+                pruned = c(pruned,pruned.snp)
+                cat("CHR", chr.id, " pruned SNP for exposure and mediator:", length(pruned.snp),"\n")
+               
+            } else {
+                pruned.snp = fread(pruned.file)
+                pruned.snp = as.data.frame(pruned.snp)
+                
+                pruned = c(pruned,pruned.snp[,"SNP"])
+                cat("CHR", chr.id, " pruned SNP for exposure and mediator:", dim(pruned.snp)[1],"\n")
+             
+            }
+        }
+        
+    }
+    print("# of snps left")
+    print(length(pruned))
+    exp_dat = dat %>% filter(SNP %in% pruned)
+    med_dat = mediatordat %>% filter(SNP %in% pruned)
+    if(dim(exp_dat)[1]<3) {
+          print("No enough SNPs for MVMR")
+        return(NULL)
+    } else {
+        
+        exp_dat$id = exposure.id
+        med_dat$id = mediator.id
+        if(!"EAF" %in% colnames(exp_dat)) {
+            exp_dat$EAF = NA
+        }
+         if(!"EAF" %in% colnames(med_dat)) {
+            med_dat$EAF = NA
+        }
+        exp_dat = exp_dat[,c("POS","CHR","SE","BETA","N","id","SNP","A1","A2","EAF")]
+        
+        exp_dat$exposure = exposure.id
+        
+        colnames(exp_dat) = c("pos.exposure","chr.exposure","se.exposure","beta.exposure","samplesize.exposure","id.exposure","SNP","effect_allele.exposure","other_allele.exposure","eaf.exposure","exposure")
+        
+        
+        cat("Finish extracting exposure data\n")
+        
+        
+        med_dat = med_dat[,c("POS","CHR","SE","BETA","N","id","SNP","A1","A2","EAF")]
+        
+        med_dat$mediator = mediator.id
+        
+        colnames(med_dat) = c("pos.mediator","chr.mediator","se.mediator","beta.mediator","samplesize.mediator","id.mediator","SNP","effect_allele.mediator","other_allele.mediator","eaf.mediator","mediator")
+        
+        
+        cat("Finish extracting mediator data\n")
+        
+        
+        #####################################################
+        # Step 2: combine with the outcome GWAS dataset
+        #####################################################
+        SNPset=intersect( exp_dat$SNP, med_dat$SNP)
+        #should be the same as single dataset 
+        outcome_dat = outcomedat[outcomedat[,"SNP"]%in% SNPset,]
+        
+        outcome_dat$id.outcome = outcome.id
+        outcome_dat$outcome = outcome.id
+        
+        if(!"EAF" %in% colnames(outcome_dat)) {
+            outcome_dat$EAF = NA
+        }
+        outcome_dat = outcome_dat[, c("id.outcome","outcome","BETA","SE","A1","A2","P","EAF","N","SNP","CHR","POS")]
+        
+        colnames(outcome_dat) = c("id.outcome","outcome","beta.outcome","se.outcome","effect_allele.outcome","other_allele.outcome","pval.outcome","eaf.outcome","samplesize.outcome","SNP","chr","pos")
+        
+        
+        harmonsze_dat = harmonise_data(exposure_dat = exp_dat, outcome_dat = outcome_dat)#
+        harmonsze_dat = harmonsze_dat[harmonsze_dat[,"mr_keep"],]
+#adding mediator
+        
+        med_dat= med_dat[match(  harmonsze_dat$SNP,med_dat$SNP), ] 
+       
+         harmonsze_dat=cbind(harmonsze_dat,med_dat)
+          MR_datall = harmonsze_dat
+        ########################################
+        # Step 3: conduct analysis
+        ########################################
+        b_exp = harmonsze_dat$beta.exposure
+        b_out = harmonsze_dat$beta.outcome
+        se_exp = harmonsze_dat$se.exposure
+        se_out = harmonsze_dat$se.outcome
+        nx = floor(median(harmonsze_dat$samplesize.exposure))
+        ny = floor(median(harmonsze_dat$samplesize.outcome))
+        nz = floor(median(harmonsze_dat$samplesize.mediator))
+        b_med= harmonsze_dat$beta.mediator
+        se_med = harmonsze_dat$se.mediator
+    ## MVMR 
+        
+      BXGs=data.frame(cbind(b_exp ,b_med))
+      seBXGs=data.frame(cbind(se_exp,se_med))
+      colnames(BXGs)=c("X","M")
+      colnames(seBXGs)=c("X","M")
+      input=format_mvmr(BXGs,b_out,seBXGs,se_out,RSID=harmonsze_dat$SNP)
+    
+      ivw_mvmr_result=ivw_mvmr(input)
+     # ivw_theta=ivw_mvmr_result[1,1]
+    #  ivw_tauY=ivw_mvmr_result[2,1]
+     # MVMRivw_theta_se=ivw_mvmr_result[1,2]
+    #  MVMRivw_tauY_se=ivw_mvmr_result[2,2]
+     
+        return(list(res = ivw_mvmr_result, MRdat = MR_datall))
+    }
+}
+
+
+
+```
+
+
+```{r,echo=FALSE,include = FALSE}
+require(MASS)
+MR_proposed <- function(exposure.id, mediator.id, outcome.id, overlap.mat, sel.pthr = 5e-8, refpanel=NULL,indep.method = "clumping", rerand = TRUE)  {
+  
+    tmpdir = paste0("C:\\Users\\25110\\Desktop\\tmp\\proposed_",exposure.id,"\\")
+    dir.create(tmpdir)
+     med_tmpdir = paste0("C:\\Users\\25110\\Desktop\\tmp\\proposed_",mediator.id,"\\")
+    dir.create(med_tmpdir)
+    #exposure.id = "pheno10"
+    #outcome.id = "AD_Jansene"
+    if(is.null(refpanel)) {
+        refpanel = "C:\\Users\\25110\\Desktop\\tmp\\1000G_Phase1_plinkfiles\\1000G_plinkfiles\\1000G.mac5eur."
+        warning("This is just for local use")
+    }
+    # rerandomization
+    etamean1 =0.5
+    etamean2 = 0.5
+    #sel.pthr = 5e-5
+    #proxies = "FALSE"
+    
+    # read it through gwasvcf
+    dat = fread(paste("E:\\Filtered_GWAS\\",exposure.id,"_GWAS.txt",sep=""))
+    dat = as.data.frame(dat)
+    mediatordat = fread(paste("E:\\Filtered_GWAS\\",mediator.id,"_GWAS.txt",sep=""))
+    mediatordat = as.data.frame(mediatordat)
+    outcomedat = fread(paste("E:\\Filtered_GWAS\\",outcome.id,"_GWAS.txt",sep=""))
+    outcomedat = as.data.frame(outcomedat)
+    
+    #only consider SNPs in three dataset
+    SNPset=intersect(intersect(dat$SNP, outcomedat$SNP),mediatordat$SNP)
+    dat = dat[dat$SNP %in% SNPset,]
+    mediatordat =  mediatordat[ mediatordat$SNP %in% SNPset,]
+    outcomedat = outcomedat[outcomedat$SNP %in% SNPset,]
+    MR_datall = list()
+    MR_datall2 = list()
+    
+    set.seed(100)
+    #####################################################
+    # Step 1.0: get the indepdent SNPs
+    #####################################################
+    
+    pruned = NULL
+    X_sig=NULL
+    M_sig=NULL
+    cat("Finish reading exposure data: ", exposure.id,"\n")
+    cat("Finish reading mediator data: ", mediator.id,"\n")
+    cat("Finish reading outcome data: ", outcome.id,"\n")
+    
+    for(chr.id in 1:22) {
+       tmp.snp.file = paste0(tmpdir,exposure.id,"_CHR",chr.id,"txt")
+        #"C:\\Users\\25110\\Desktop\\tmp\\exposure.id\\exposure.id_CHR1.text"
+        tmp = dat %>% filter(CHR==chr.id)
+         
+        #med_tmp.snp.file =paste0(med_tmpdir,mediator.id,"_CHR",chr.id,"txt")
+        #"C:\\Users\\25110\\Desktop\\tmp\\exposure.id\\exposure.id_CHR1.text"
+        med_tmp = mediatordat %>% filter(CHR==chr.id)
+       W1 =rnorm(nrow(tmp), 0,sd=etamean1)
+       W2 =rnorm(nrow(tmp), 0,sd=etamean2)
+    # Step 2: Select significant SNPs:
+    C_sel = qnorm(sel.pthr/2,lower.tail = FALSE) #* sqrt(1 + eta^2)
+    
+     if(rerand) { # recalculated p value when rerandomized
+            tmpP = tmp[,"BETA"]/tmp[,"SE"] + W1
+            tmpP2 = pnorm(abs(tmpP/sqrt(1 + etamean1^2)),lower.tail = FALSE) * 2
+            med_tmpP = med_tmp[,"BETA"]/med_tmp[,"SE"] + W2
+            med_tmpP2 = pnorm(abs(med_tmpP/sqrt(1 + etamean2^2)),lower.tail = FALSE) * 2
+            
+        } else {
+            # use the original ones
+            tmpP = tmp[,"BETA"]/tmp[,"SE"]
+            tmpP2 = tmp[,"P"]
+            med_tmpP = med_tmp[,"BETA"]/med_tmp[,"SE"]
+            med_tmpP2 = med_tmp[,"P"]
+        }
+    
+   #selection threshold
+        ind_filter = which(abs(tmpP) >= C_sel)
+        ind_filter2 = which(abs(med_tmpP) >= C_sel)
+    
+     tmpSNP=tmp[ind_filter,"SNP"]
+        med_SNP=med_tmp[ind_filter2,"SNP"]
+        X_sig=c(X_sig,tmpSNP)
+        M_sig=c(M_sig,med_SNP)
+        union_SNP=union(tmpSNP,med_SNP)
+        if(length(ind_filter)==0 & length(ind_filter2)==0 ) {
+            next
+        }
+        
+  
+        
+        ind_filter_tmp=which(tmp$SNP%in%union_SNP)
+        ind_filter_med=which(med_tmp$SNP%in%union_SNP)
+   
+        tmp = tmp[ind_filter_tmp,]
+        tmp = as.data.frame(tmp)
+        med_tmp = med_tmp[ind_filter_med,]
+        med_tmp = as.data.frame(med_tmp)
+        tmpSE = tmp[,"SE"]
+        med_tmpSE=med_tmp[,"SE"]
+        # change pval for sigma-based clumping
+            if(indep.method == "clumping") {
+                tmp$P = tmpP2[ind_filter_tmp]
+            } else {
+              tmpSE=tmpSE^2/mean(tmpSE^2)
+                tmp$P = 1/(1 + exp(-tmpSE)) - 0.5
+            }
+      
+            if(indep.method == "clumping") {
+                med_tmp$P = med_tmpP2[ind_filter_med]
+            } else {
+               med_tmpSE=med_tmpSE^2/mean(med_tmpSE^2)
+                med_tmp$P = 1/(1 + exp(-med_tmpSE)) - 0.5
+            }
+  
+        
+        med_tmp=med_tmp[match( tmp$SNP,med_tmp$SNP), ] 
+        tmp$BETAM=med_tmp$BETA
+        tmp$SEM=med_tmp$SE
+        tmp$PM=med_tmp$P
+        tmp$ZM=med_tmp$Z
+        tmp_new= mutate(tmp, index1 = PM<P)
+        tmp_M=tmp_new[tmp_new$index1==TRUE,c("CHR","POS","SNP","A1","A2","ZM","BETAM","SEM","PM","N")]
+          tmp_X=tmp_new[tmp_new$index1==FALSE,c("CHR","POS","SNP","A1","A2","Z","BETA","SE","P","N")]
+          colnames(tmp_M)=c("CHR","POS","SNP","A1","A2","Z","BETA","SE","P","N")
+          ref_all=rbind(tmp_M,tmp_X)
+          ref_all=ref_all[match( med_tmp$SNP,ref_all$SNP), ] 
+          cat("Combind Exposure and Mediator with smallest p-value.\n")
+          
+          
+        tmp.ssfile = paste0(tmpdir,exposure.id,"_ss_CHR",chr.id,".txt")
+        
+        write.table(ref_all,file = tmp.ssfile,quote=FALSE,row.names=FALSE,col.names=TRUE)
+        
+        SNP_list = ref_all$SNP
+        
+        write.table( SNP_list,file = tmp.snp.file,quote=FALSE,row.names=FALSE,col.names=FALSE)
+        
+        system(paste0("C:\\Users\\25110\\Desktop\\tmp\\plink --silent --bfile ",refpanel,chr.id,  " --chr ", chr.id," --extract ", tmp.snp.file," --make-bed --out ",tmpdir,exposure.id,"_CHR",chr.id))
+      
+        
+        if(indep.method == "prunning.org") {
+            command = paste0("C:\\Users\\25110\\Desktop\\tmp\\plink --silent --bfile ",tmpdir,exposure.id,"_CHR",chr.id, "  --indep-pairwise 10000 100 0.001 --out ",tmpdir,exposure.id,"_CHR",chr.id)
+            system(command)
+            
+            pruned.file = paste0(tmpdir,exposure.id,"_CHR",chr.id,".prune.in")
+            
+            
+            } else {
+            #clumping
+            command <- paste("C:\\Users\\25110\\Desktop\\tmp\\plink --silent --bfile ",tmpdir,exposure.id,"_CHR",chr.id, " --clump ", tmp.ssfile, "  --clump-p1 1 --clump-kb 10000 --clump-r2 0.001  --clump-snp-field SNP --clump-field P --out ", tmpdir,exposure.id,"_CHR",chr.id, sep = "")
+            system(command)
+            pruned.file = paste(tmpdir,exposure.id,"_CHR",chr.id, ".clumped", sep = "")
+            
+          
+        }
+#pruned for exposure and pruned for mediator should be different.
+        if(file.exists(pruned.file)) {
+           
+            if(indep.method == "prunning.org") {
+                pruned.snp = fread(pruned.file,header=FALSE)
+                pruned.snp = as.data.frame(pruned.snp)
+                pruned.snp = pruned.snp[,1]
+                pruned = c(pruned,pruned.snp)
+                cat("CHR", chr.id, " pruned SNP for exposure and mediator:", length(pruned.snp),"\n")
+               
+            } else {
+                pruned.snp = fread(pruned.file)
+                pruned.snp = as.data.frame(pruned.snp)
+                
+                pruned = c(pruned,pruned.snp[,"SNP"])
+                cat("CHR", chr.id, " pruned SNP for exposure and mediator:", dim(pruned.snp)[1],"\n")
+             
+            }
+        }
+        
+    }
+   exp_dat1 = dat %>% filter((SNP %in% pruned)&(SNP%in%X_sig)) #randomization
+   exp_dat2 = dat %>% filter((SNP %in% pruned)&(SNP%in%M_sig)) #corresponding M_sig X
+  med_dat1 = mediatordat %>% filter((SNP %in% pruned)&(SNP%in%M_sig)) #randomization
+   med_dat2 = mediatordat %>% filter((SNP %in% pruned)&(SNP%in%X_sig))#corresponfing X_sig M
+  
+    if((dim(exp_dat1)[1]<3)|(dim(med_dat1)[1]<3)) {
+         print("No enough SNPs for proposed method")
+        return(NULL)
+    } else {
+        
+        exp_dat1$id = exposure.id
+        exp_dat2$id = exposure.id
+        med_dat1$id = mediator.id
+        med_dat2$id = mediator.id
+        if(!"EAF" %in% colnames(exp_dat1)) {
+            exp_dat1$EAF = NA
+        }
+         if(!"EAF" %in% colnames(med_dat1)) {
+            med_dat1$EAF = NA
+         }
+        
+          if(!"EAF" %in% colnames(exp_dat2)) {
+            exp_dat2$EAF = NA
+        }
+         if(!"EAF" %in% colnames(med_dat2)) {
+            med_dat2$EAF = NA
+        }
+        exp_dat1 = exp_dat1[,c("POS","CHR","SE","BETA","N","id","SNP","A1","A2","EAF")]
+        
+        exp_dat1$exposure = exposure.id
+        
+        colnames(exp_dat1) = c("pos.exposure","chr.exposure","se.exposure","beta.exposure","samplesize.exposure","id.exposure","SNP","effect_allele.exposure","other_allele.exposure","eaf.exposure","exposure")
+        
+                exp_dat2 = exp_dat2[,c("POS","CHR","SE","BETA","N","id","SNP","A1","A2","EAF")]
+        
+        exp_dat2$exposure = exposure.id
+        
+        colnames(exp_dat2) = c("pos.exposure","chr.exposure","se.exposure","beta.exposure","samplesize.exposure","id.exposure","SNP","effect_allele.exposure","other_allele.exposure","eaf.exposure","exposure")
+        cat("Finish extracting exposure data\n")
+        
+        
+        med_dat1 = med_dat1[,c("POS","CHR","SE","BETA","N","id","SNP","A1","A2","EAF")]
+        
+        med_dat1$exposure = mediator.id
+        
+        colnames(med_dat1) = c("pos.mediator","chr.mediator","se.mediator","beta.mediator","samplesize.mediator","id.mediator","SNP","effect_allele.mediator","other_allele.mediator","eaf.mediator","mediator")
+        
+           med_dat2 = med_dat2[,c("POS","CHR","SE","BETA","N","id","SNP","A1","A2","EAF")]
+        
+        med_dat2$exposure = mediator.id
+        
+        colnames(med_dat2) = c("pos.mediator","chr.mediator","se.mediator","beta.mediator","samplesize.mediator","id.mediator","SNP","effect_allele.mediator","other_allele.mediator","eaf.mediator","mediator")
+        
+        cat("Finish extracting mediator data\n")
+         cat("Start rerandomizing exposure and mediator data\n")
+#overlapping part       
+  #  SNP_overlapping=intersect( X_sig, M_sig)
+    #randomization for selected ones     
+    gamma1.exp_sel=exp_dat1$beta.exposure
+    se1.exp_sel=exp_dat1$se.exposure
+    eta_sel=etamean1
+    alpha1=(-C_sel-gamma1.exp_sel/se1.exp_sel)/eta_sel
+    alpha2=(C_sel-gamma1.exp_sel/se1.exp_sel)/eta_sel
+    gamma1.carve=gamma1.exp_sel-(se1.exp_sel/eta_sel)*((dnorm(alpha2)-dnorm(alpha1))/(pnorm(alpha1)+1-pnorm(alpha2)))
+    sigma21.carve=(1-((alpha2*dnorm(alpha2)-alpha1*dnorm(alpha1))/(1-pnorm(alpha2)+pnorm(alpha1))-((dnorm(alpha2)-dnorm(alpha1))/(1-pnorm(alpha2)+pnorm(alpha1)))^2)/eta_sel^2)*se1.exp_sel^2
+    exp_dat1$beta.exposure=gamma1.carve
+    exp_dat1$se.exposure=sqrt(sigma21.carve)
+    #randomization for unselected ones exposure Sm beta_Xj
+    index_overlapping=which(exp_dat2$SNP%in% X_sig)
+     gamma3.exp_sel=exp_dat2$beta.exposure
+    se3.exp_sel=exp_dat2$se.exposure
+    eta_sel=etamean1
+    alpha1=(-C_sel-gamma3.exp_sel/se3.exp_sel)/eta_sel
+    alpha2=(C_sel-gamma3.exp_sel/se3.exp_sel)/eta_sel
+#beta_Xj all for rb the other side
+    gamma3.carve=gamma3.exp_sel+(se3.exp_sel/eta_sel)*((dnorm(alpha2)-dnorm(alpha1))/(pnorm(alpha2)-pnorm(alpha1)))
+  #beta_Xj rb for the overlapping set
+    gamma3.carve[index_overlapping]=gamma3.exp_sel[index_overlapping]-(se3.exp_sel[index_overlapping]/eta_sel)*((dnorm(alpha2[index_overlapping])-dnorm(alpha1[index_overlapping]))/(pnorm(alpha1[index_overlapping])+1-pnorm(alpha2[index_overlapping])))
+    exp_dat2$beta.exposure=gamma3.carve
+    
+    
+    
+    gamma2.exp_sel=med_dat1$beta.mediator
+    se2.exp_sel=med_dat1$se.mediator
+    eta_sel=etamean2
+    alpha1=(-C_sel-gamma2.exp_sel/se2.exp_sel)/eta_sel
+    alpha2=(C_sel-gamma2.exp_sel/se2.exp_sel)/eta_sel
+    gamma2.carve=gamma2.exp_sel-(se2.exp_sel/eta_sel)*((dnorm(alpha2)-dnorm(alpha1))/(pnorm(alpha1)+1-pnorm(alpha2)))
+    sigma22.carve=(1-((alpha2*dnorm(alpha2)-alpha1*dnorm(alpha1))/(1-pnorm(alpha2)+pnorm(alpha1))-((dnorm(alpha2)-dnorm(alpha1))/(1-pnorm(alpha2)+pnorm(alpha1)))^2)/eta_sel^2)*se2.exp_sel^2
+    med_dat1$beta.mediator=gamma2.carve
+    med_dat1$se.mediator=sqrt(sigma22.carve)
+    
+       #randomization for unselected ones
+     index_overlapping=which(med_dat2$SNP%in% M_sig)
+     gamma4.exp_sel=med_dat2$beta.mediator
+    se4.exp_sel=med_dat2$se.mediator
+    eta_sel=etamean2
+    alpha1=(-C_sel-gamma4.exp_sel/se4.exp_sel)/eta_sel
+    alpha2=(C_sel-gamma4.exp_sel/se4.exp_sel)/eta_sel
+    gamma4.carve=gamma4.exp_sel+(se4.exp_sel/eta_sel)*((dnorm(alpha2)-dnorm(alpha1))/(pnorm(alpha2)-pnorm(alpha1)))
+     gamma4.carve[index_overlapping]=gamma4.exp_sel[index_overlapping]-(se4.exp_sel[index_overlapping]/eta_sel)*((dnorm(alpha2[index_overlapping])-dnorm(alpha1[index_overlapping]))/(pnorm(alpha1[index_overlapping])+1-pnorm(alpha2[index_overlapping])))
+    med_dat2$beta.mediator=gamma4.carve
+    
+    
+        #####################################################
+        # Step 2: combine with the outcome GWAS dataset
+        #####################################################
+        SNPset=union( exp_dat1$SNP, med_dat1$SNP)
+     
+        #should be different in selection 
+        outcome_dat = outcomedat[outcomedat[,"SNP"]%in% SNPset,]
+        
+        outcome_dat$id.outcome = outcome.id
+        outcome_dat$outcome = outcome.id
+        
+        if(!"EAF" %in% colnames(outcome_dat)) {
+            outcome_dat$EAF = NA
+        }
+        outcome_dat = outcome_dat[, c("id.outcome","outcome","BETA","SE","A1","A2","P","EAF","N","SNP","CHR","POS")]
+        
+        colnames(outcome_dat) = c("id.outcome","outcome","beta.outcome","se.outcome","effect_allele.outcome","other_allele.outcome","pval.outcome","eaf.outcome","samplesize.outcome","SNP","chr","pos")
+        
+        
+        harmonsze_dat = harmonise_data(exposure_dat = exp_dat1, outcome_dat = outcome_dat)#
+        harmonsze_dat = harmonsze_dat[harmonsze_dat[,"mr_keep"],]
+#adding mediator 
+       med_dat2= med_dat2[match(  harmonsze_dat$SNP,med_dat2$SNP), ] 
+       
+       harmonsze_dat=cbind(harmonsze_dat,med_dat2)
+          MR_datall = harmonsze_dat
+          med_dat1_tmp=med_dat1
+          colnames(med_dat1_tmp) = c("pos.exposure","chr.exposure","se.exposure","beta.exposure","samplesize.exposure","id.exposure","SNP","effect_allele.exposure","other_allele.exposure","eaf.exposure","exposure")
+   harmonsze_dat2 = harmonise_data(exposure_dat =med_dat1_tmp, outcome_dat = outcome_dat)#
+        harmonsze_dat2 = harmonsze_dat2[harmonsze_dat2[,"mr_keep"],]
+#adding mediator 
+        colnames(harmonsze_dat2)=c("SNP","effect_allele.mediator","other_allele.mediator","effect_allele.outcome","other_allele.outcome","beta.mediator","beta.outcome","eaf.mediator","eaf.outcome","remove","palindromic","ambiguous","id.outcome","outcome","se.outcome","pval.outcome","samplesize.outcome","chr","pos","pos.mediator","chr.mediator","se.mediator","samplesize.mediator","id.mediator","mediator","action","mr_keep")
+       exp_dat2=exp_dat2[match(  harmonsze_dat2$SNP,exp_dat2$SNP), ] 
+       
+       harmonsze_dat2=cbind(harmonsze_dat2,exp_dat2)
+          MR_datall2 = harmonsze_dat2
+          
+        ########################################
+        # Step 3: conduct analysis #have to add med_snp and exp_snp as reference to conduct analysis
+        ########################################
+          #harmonsze_dat1:X randomized M reverse randomized
+        b_exp_random = harmonsze_dat$beta.exposure
+        b_out = harmonsze_dat$beta.outcome
+        se_exp_random = harmonsze_dat$se.exposure
+        se_out = harmonsze_dat$se.outcome
+        b_med=harmonsze_dat$beta.mediator
+        se_med=harmonsze_dat$se.mediator
+        
+         # harmonsze_dat2:M randomized X reverse randomized
+        b_exp = harmonsze_dat2$beta.exposure
+        b_out2 = harmonsze_dat2$beta.outcome
+        se_exp= harmonsze_dat2$se.exposure
+        se_out2 = harmonsze_dat2$se.outcome
+        b_med_random=harmonsze_dat2$beta.mediator
+        se_med_random=harmonsze_dat2$se.mediator
+        
+        nx = floor(median(harmonsze_dat$samplesize.exposure))
+        ny = floor(median(harmonsze_dat$samplesize.outcome))
+        nz = floor(median(harmonsze_dat$samplesize.mediator))
+    ## proposed
+ele1=sum((b_exp_random^2-se_exp_random^2)/(se_out^2))
+# ele1= sum((b_exp_random^2)/(se_out^2))
+ ele2=sum(b_exp_random*b_med/(se_out^2))
+ ele3=sum(b_exp*b_med_random/(se_out2^2))
+ ele4=sum((b_med_random^2-se_med_random^2)/(se_out2^2))
+#ele4=sum((b_med_random^2)/(se_out2^2))
+ele5=sum((b_exp_random^2-se_exp_random^2)/(se_med^2))
+eleY1=sum( b_exp_random*b_out/(se_out^2))
+eleY2=sum(b_med_random* b_out2/(se_out2^2))
+eleY3=sum(b_exp_random*b_med/(se_med^2))
+
+
+sum_mat=matrix(c(ele1,ele2,0,ele3,ele4,0,0,0,ele5),nrow=3,ncol=3,byrow=TRUE)
+sum_vector=c(eleY1,eleY2,eleY3)
+estimator_rerand=solve(sum_mat)%*%sum_vector
+thetaRIVW=estimator_rerand[1]
+tauyRIVW=estimator_rerand[2]
+tauxRIVW=estimator_rerand[3]
+tauRIVW=tauyRIVW*tauxRIVW
+#covariance estimation
+regression_residuals1= sum( (b_out * b_exp_random -thetaRIVW * (b_exp_random ^2 - se_exp_random^2) -tauyRIVW*b_exp_random *b_med)^2/ se_out^4)
+regression_residuals2= sum( (b_out2 * b_med_random-tauyRIVW * (b_med_random^2 - se_med_random^2) -thetaRIVW*b_exp*b_med_random)^2/ se_out2^4)
+regression_residuals3= sum( (b_med*b_exp_random - tauxRIVW * (b_exp_random^2 - se_exp_random^2))^2 / se_med^4)
+
+SNPoverlap=intersect(exp_dat1$SNP,med_dat1$SNP)
+if(length(SNPoverlap)>=1)
+{subset1=harmonsze_dat[harmonsze_dat$SNP%in%SNPoverlap,]
+subset2=harmonsze_dat2[harmonsze_dat2$SNP%in%SNPoverlap,]
+##adjusting order
+  subset2=subset2[match( subset1$SNP,subset2$SNP), ] 
+cov_12= sum( (subset1$beta.outcome * subset1$beta.exposure-thetaRIVW * (subset1$beta.exposure ^2 - subset1$se.exposure^2) -tauyRIVW*subset1$beta.exposure *subset1$beta.mediator)*(subset2$beta.outcome * subset2$beta.mediator -tauyRIVW * (subset2$beta.mediator^2 - subset2$se.mediator^2) -thetaRIVW*subset2$beta.exposure*subset2$beta.mediator)/ subset2$se.outcome^4)
+
+cov_13=sum( (b_out * b_exp_random-thetaRIVW * (b_exp_random ^2 - se_exp_random^2) -tauyRIVW*b_exp_random*b_med)*(b_med *b_exp_random- tauxRIVW * (b_exp_random ^2 - se_exp_random^2))/ (se_out^2*se_med^2))
+
+
+cov_23=sum((subset2$beta.outcome *subset2$beta.mediator -tauyRIVW * (subset2$beta.mediator ^2 - subset2$se.mediator^2) -thetaRIVW*subset2$beta.exposure *subset2$beta.mediator)*(subset1$beta.mediator *subset1$beta.exposure - tauxRIVW * (subset1$beta.exposure ^2 - subset1$se.exposure^2))/(subset2$se.outcome ^2* subset2$se.mediator^2))
+
+}else{
+  
+  cov_12=0
+
+cov_13=sum( (b_out * b_exp_random-thetaRIVW * (b_exp_random ^2 - se_exp_random^2) -tauyRIVW*b_exp_random*b_med)*(b_med *b_exp_random- tauxRIVW * (b_exp_random ^2 - se_exp_random^2))/ (se_out^2*se_med^2))
+
+
+cov_23=0
+}
+var_matrix=matrix(c(regression_residuals1,cov_12,cov_13,
+                    cov_12,regression_residuals2,cov_23,
+                  cov_13,cov_23,regression_residuals3),nrow=3,ncol=3,byrow=TRUE)
+var_matrix_final=solve(sum_mat)%*%var_matrix%*%t(solve(sum_mat))
+print(var_matrix_final)
+v1_theta=var_matrix_final[1,1]
+v2_tauy=var_matrix_final[2,2]
+v3_taux=var_matrix_final[3,3]
+vector_C=c(tauyRIVW,tauxRIVW)
+sub_variance_matrix=var_matrix_final[2:3,2:3]
+
+sd_tau=msm::deltamethod(~ x1*x2,vector_C,sub_variance_matrix)
+
+
+
+
+res = list(thetaRIVW = thetaRIVW,tauyRIVW = tauyRIVW,tauxRIVW = tauxRIVW,tauRIVW= tauRIVW,thetase =sqrt(v1_theta),tauyse = sqrt(v2_tauy),tauxse = sqrt(v3_taux),tause = sd_tau)
+ return(list(res = res, MRdatXrandom = MR_datall,MRdatMrandom=MR_datall2))
+    }
+}
+```
+
+
+
+
+
+```{r,echo=FALSE,include = FALSE}
+MR_total_effect <- function(exposure.id, mediator.id, outcome.id, overlap.mat, sel.pthr = 5e-8, refpanel=NULL,indep.method = "clumping", rerand = FALSE)  {
+   tmpdir = paste0("C:\\Users\\25110\\Desktop\\tmp\\total_effect_",exposure.id,"\\")
+    dir.create(tmpdir)
+     med_tmpdir = paste0("C:\\Users\\25110\\Desktop\\tmp\\total_effect_",mediator.id,"\\")
+    dir.create(med_tmpdir)
+    #exposure.id = "pheno10"
+    #outcome.id = "AD_Jansene"
+    if(is.null(refpanel)) {
+        refpanel = "C:\\Users\\25110\\Desktop\\tmp\\1000G_Phase1_plinkfiles\\1000G_plinkfiles\\1000G.mac5eur."
+        warning("This is just for local use")
+    }
+    # rerandomization
+    etamean = 0.5
+    #sel.pthr = 5e-5
+    #proxies = "FALSE"
+    
+
+    dat = fread(paste("E:\\Filtered_GWAS\\",exposure.id,"_GWAS.txt",sep=""))
+    dat = as.data.frame(dat)
+    mediatordat = fread(paste("E:\\Filtered_GWAS\\",mediator.id,"_GWAS.txt",sep=""))
+    mediatordat = as.data.frame(mediatordat)
+    outcomedat = fread(paste("E:\\Filtered_GWAS\\",outcome.id,"_GWAS.txt",sep=""))
+    outcomedat = as.data.frame(outcomedat)
+    nx=median(dat$SE)
+    nm=median(mediatordat$SE)
+  
+    #only consider SNPs in three dataset
+   SNPset=intersect(intersect(dat$SNP, outcomedat$SNP),mediatordat$SNP)
+    dat = dat[dat$SNP %in% SNPset,]
+    mediatordat =  mediatordat[ mediatordat$SNP %in% SNPset,]
+    outcomedat = outcomedat[outcomedat$SNP %in% SNPset,]
+    MR_datall = list()
+    
+    
+    set.seed(100)
+    #####################################################
+    # Step 1.0: get the indepdent SNPs
+    #####################################################
+    
+    pruned = NULL
+    M_sig=NULL
+    cat("Finish reading exposure data: ", exposure.id,"\n")
+    cat("Finish reading mediator data: ", mediator.id,"\n")
+    cat("Finish reading outcome data: ", outcome.id,"\n")
+    
+    for(chr.id in 1:22) {
+        tmp.snp.file = paste0(tmpdir,exposure.id,"_CHR",chr.id,"txt")
+        #"C:\\Users\\25110\\Desktop\\tmp\\exposure.id\\exposure.id_CHR1.text"
+        tmp = dat %>% filter(CHR==chr.id)
+     
+        
+        W = rnorm(dim(tmp)[1], 0, etamean)
+        
+        
+        med_tmp.snp.file=paste0(med_tmpdir,mediator.id,"_CHR",chr.id,"txt")
+        #"C:\\Users\\25110\\Desktop\\tmp\\exposure.id\\exposure.id_CHR1.text"
+        med_tmp = mediatordat %>% filter(CHR==chr.id)
+        
+         W2 = rnorm(dim(med_tmp)[1], 0, etamean)
+        
+        # Step 2: Select significant SNPs:
+        C_sel = qnorm(sel.pthr/2,lower.tail = FALSE) #* sqrt(1 + eta^2)
+        
+        if(rerand) { # recalculated p value when rerandomized
+            tmpP = tmp[,"BETA"]/tmp[,"SE"] + W
+            tmpP2 = pnorm(abs(tmpP/sqrt(1 + etamean^2)),lower.tail = FALSE) * 2
+            med_tmpP = med_tmp[,"BETA"]/med_tmp[,"SE"] + W2
+            med_tmpP2 = pnorm(abs(med_tmpP/sqrt(1 + etamean^2)),lower.tail = FALSE) * 2
+            
+        } else {
+            # use the original ones
+            tmpP = tmp[,"BETA"]/tmp[,"SE"]
+            tmpP2 = tmp[,"P"]
+            med_tmpP = med_tmp[,"BETA"]/med_tmp[,"SE"]
+            med_tmpP2 = med_tmp[,"P"]
+        }
+        
+        
+        ind_filter = which(abs(tmpP) >= C_sel)
+        ind_filter2 = which(abs(med_tmpP) >= C_sel)
+       
+        tmpSNP=tmp[ind_filter,"SNP"]
+        med_SNP=med_tmp[ind_filter2,"SNP"]
+       diffX=setdiff(tmpSNP,med_SNP)
+        
+        if(length(ind_filter)==0 & length(ind_filter2)==0) {
+            next
+        }
+         
+       M_sig=c(M_sig,med_SNP)
+        # select the SNPs
+        tmp = tmp[tmp$SNP%in%diffX,]
+        tmp = as.data.frame(tmp)
+        tmpSE = tmp[,"SE"]
+   
+        if(indep.method == "clumping") {
+                tmp$P = tmpP2[setdiff(ind_filter,ind_filter2)]
+            } else {
+              tmpSE=tmpSE^2/mean(tmpSE^2)
+                tmp$P = 1/(1 + exp(-tmpSE)) - 0.5
+            }
+      
+          
+  
+       
+        tmp.ssfile = paste0(tmpdir,exposure.id,"_ss_CHR",chr.id,".txt")
+        
+        write.table(tmp,file = tmp.ssfile,quote=FALSE,row.names=FALSE,col.names=TRUE)
+        
+        tmp = tmp$SNP
+        
+        write.table(tmp,file = tmp.snp.file,quote=FALSE,row.names=FALSE,col.names=FALSE)
+        
+        system(paste0("C:\\Users\\25110\\Desktop\\tmp\\plink --silent --bfile ",refpanel,chr.id,  " --chr ", chr.id," --extract ", tmp.snp.file," --make-bed --out ",tmpdir,exposure.id,"_CHR",chr.id))
+    
+        
+        if(indep.method == "prunning.org") {
+            command = paste0("C:\\Users\\25110\\Desktop\\tmp\\plink --silent --bfile ",tmpdir,exposure.id,"_CHR",chr.id, "  --indep-pairwise 10000 100 0.001 --out ",tmpdir,exposure.id,"_CHR",chr.id)
+            system(command)
+             pruned.file = paste0(tmpdir,exposure.id,"_CHR",chr.id,".prune.in")
+            } else {
+            #clumping
+            command <- paste("C:\\Users\\25110\\Desktop\\tmp\\plink --silent --bfile ",tmpdir,exposure.id,"_CHR",chr.id, " --clump ", tmp.ssfile, "  --clump-p1 1 --clump-kb 10000 --clump-r2 0.001  --clump-snp-field SNP --clump-field P --out ", tmpdir,exposure.id,"_CHR",chr.id, sep = "")
+            system(command)
+            pruned.file = paste(tmpdir,exposure.id,"_CHR",chr.id, ".clumped", sep = "")
+            
+        }
+#pruned for exposure and pruned for mediator should be the same.
+        if(file.exists(pruned.file)) {
+           
+            if(indep.method == "prunning.org") {
+                pruned.snp = fread(pruned.file,header=FALSE)
+                pruned.snp = as.data.frame(pruned.snp)
+                pruned.snp = pruned.snp[,1]
+                pruned = c(pruned,pruned.snp)
+                cat("CHR", chr.id, " pruned SNP for exposure:", length(pruned.snp),"\n")
+               
+            } else {
+                pruned.snp = fread(pruned.file)
+                pruned.snp = as.data.frame(pruned.snp)
+                
+                pruned = c(pruned,pruned.snp[,"SNP"])
+                cat("CHR", chr.id, " pruned SNP for exposure:", dim(pruned.snp)[1],"\n")
+             
+            }
+        }
+        
+    }
+    
+    exp_dat = dat %>% filter((SNP %in% pruned))
+    med_dat = mediatordat %>% filter((SNP %in% pruned))
+    if(dim(exp_dat)[1]<3) {
+         print("No enough SNPs for estimating total effect")
+        return(NULL)
+    } else {
+         
+        exp_dat$id = exposure.id
+        med_dat$id =mediator.id
+        if(!"EAF" %in% colnames(exp_dat)) {
+            exp_dat$EAF = NA
+        }
+    if(!"EAF" %in% colnames(med_dat)) {
+            med_dat$EAF = NA
+        }
+        exp_dat = exp_dat[,c("POS","CHR","SE","BETA","N","id","SNP","A1","A2","EAF")]
+        
+        exp_dat$exposure = exposure.id
+        
+        colnames(exp_dat) = c("pos.exposure","chr.exposure","se.exposure","beta.exposure","samplesize.exposure","id.exposure","SNP","effect_allele.exposure","other_allele.exposure","eaf.exposure","exposure")
+        
+          med_dat =  med_dat[,c("POS","CHR","SE","BETA","N","id","SNP","A1","A2","EAF")]
+        
+         med_dat$mediator = mediator.id
+        
+        colnames(med_dat ) = c("pos.mediator","chr.mediator","se.mediator","beta.mediator","samplesize.mediator","id.mediator","SNP","effect_allele.mediator","other_allele.mediator","eaf.mediator","mediator")
+        cat("Finish extracting exposure data\n")
+        
+        #####################################################
+        # Step 2: combine with the outcome GWAS dataset
+        #####################################################
+   
+        #should be the same as single dataset 
+             
+        outcome_dat = outcomedat[outcomedat[,"SNP"]%in% exp_dat$SNP,]
+        
+        outcome_dat$id.outcome = outcome.id
+        outcome_dat$outcome = outcome.id
+        
+        if(!"EAF" %in% colnames(outcome_dat)) {
+            outcome_dat$EAF = NA
+        }
+        outcome_dat = outcome_dat[, c("id.outcome","outcome","BETA","SE","A1","A2","P","EAF","N","SNP","CHR","POS")]
+        
+        colnames(outcome_dat) = c("id.outcome","outcome","beta.outcome","se.outcome","effect_allele.outcome","other_allele.outcome","pval.outcome","eaf.outcome","samplesize.outcome","SNP","chr","pos")
+        
+ 
+        harmonsze_dat = harmonise_data(exposure_dat = exp_dat, outcome_dat = outcome_dat)#
+        harmonsze_dat = harmonsze_dat[harmonsze_dat[,"mr_keep"],]
+               
+        med_dat= med_dat[match(  harmonsze_dat$SNP,med_dat$SNP), ] 
+       
+         harmonsze_dat=cbind(harmonsze_dat,med_dat)
+        MR_datall = harmonsze_dat
+        
+        ########################################
+        # Step 3: conduct analysis
+        ########################################
+        b_exp = harmonsze_dat$beta.exposure
+        b_out = harmonsze_dat$beta.outcome
+        se_exp = harmonsze_dat$se.exposure
+        se_out = harmonsze_dat$se.outcome
+        nx = floor(median(harmonsze_dat$samplesize.exposure))
+        ny = floor(median(harmonsze_dat$samplesize.outcome))
+       MR_IVW = TwoSampleMR::mr_ivw(b_exp = b_exp,b_out = b_out,
+        se_exp = se_exp,se_out = se_out)
+       
+        return(list(res = MR_IVW, MRdat = MR_datall))
+    }
+}
+```
+
+
+```{r,echo=FALSE,include = FALSE}
+MR_2step <- function(exposure.id, mediator.id, outcome.id, overlap.mat, sel.pthr = 5e-8, refpanel=NULL,indep.method = "clumping", rerand = FALSE)  {
+   tmpdir = paste0("C:\\Users\\25110\\Desktop\\tmp\\twostep_",exposure.id,"\\")
+    dir.create(tmpdir)
+     med_tmpdir = paste0("C:\\Users\\25110\\Desktop\\tmp\\twostep_",mediator.id,"\\")
+    dir.create(med_tmpdir)
+    #exposure.id = "pheno10"
+    #outcome.id = "AD_Jansene"
+    if(is.null(refpanel)) {
+        refpanel = "C:\\Users\\25110\\Desktop\\tmp\\1000G_Phase1_plinkfiles\\1000G_plinkfiles\\1000G.mac5eur."
+        warning("This is just for local use")
+    }
+    # rerandomization
+    etamean = 0.5
+    #sel.pthr = 5e-5
+    #proxies = "FALSE"
+    
+    # read it through gwasvcf
+    dat = fread(paste("E:\\Filtered_GWAS\\",exposure.id,"_GWAS.txt",sep=""))
+    dat = as.data.frame(dat)
+    mediatordat = fread(paste("E:\\Filtered_GWAS\\",mediator.id,"_GWAS.txt",sep=""))
+    mediatordat = as.data.frame(mediatordat)
+    outcomedat = fread(paste("E:\\Filtered_GWAS\\",outcome.id,"_GWAS.txt",sep=""))
+    outcomedat = as.data.frame(outcomedat)
+      nx=median(dat$SE)
+    nm=median(mediatordat$SE)
+    #only consider SNPs in three dataset
+    SNPset=intersect(intersect(dat$SNP, outcomedat$SNP),mediatordat$SNP)
+    dat = dat[dat$SNP %in% SNPset,]
+    mediatordat =  mediatordat[ mediatordat$SNP %in% SNPset,]
+    outcomedat = outcomedat[outcomedat$SNP %in% SNPset,]
+    MR_datall = list()
+     MR_datall_second=list()
+    X_sig=NULL
+    M_sig=NULL
+    set.seed(100)
+    #####################################################
+    # Step 1.0: get the indepdent SNPs
+    #####################################################
+    
+    pruned = NULL
+    med_pruned=NULL
+    cat("Finish reading exposure data: ", exposure.id,"\n")
+    cat("Finish reading mediator data: ", mediator.id,"\n")
+    cat("Finish reading outcome data: ", outcome.id,"\n")
+    
+    for(chr.id in 1:22) {
+        tmp.snp.file = paste0(tmpdir,exposure.id,"_CHR",chr.id,"txt")
+        #"C:\\Users\\25110\\Desktop\\tmp\\exposure.id\\exposure.id_CHR1.text"
+        tmp = dat %>% filter(CHR==chr.id)
+        
+        W = rnorm(dim(tmp)[1], 0, etamean)
+        
+        
+        med_tmp.snp.file=paste0(med_tmpdir,mediator.id,"_CHR",chr.id,"txt")
+        #"C:\\Users\\25110\\Desktop\\tmp\\exposure.id\\exposure.id_CHR1.text"
+        med_tmp = mediatordat %>% filter(CHR==chr.id)
+        
+         W2 = rnorm(dim(med_tmp)[1], 0, etamean)
+        
+        # Step 2: Select significant SNPs:
+        C_sel = qnorm(sel.pthr/2,lower.tail = FALSE) #* sqrt(1 + eta^2)
+        
+        if(rerand) { # recalculated p value when rerandomized
+            tmpP = tmp[,"BETA"]/tmp[,"SE"] + W
+            tmpP2 = pnorm(abs(tmpP/sqrt(1 + etamean^2)),lower.tail = FALSE) * 2
+            med_tmpP = med_tmp[,"BETA"]/med_tmp[,"SE"] + W2
+            med_tmpP2 = pnorm(abs(med_tmpP/sqrt(1 + etamean^2)),lower.tail = FALSE) * 2
+            
+        } else {
+            # use the original ones
+            tmpP = tmp[,"BETA"]/tmp[,"SE"]
+            tmpP2 = tmp[,"P"]
+            med_tmpP = med_tmp[,"BETA"]/med_tmp[,"SE"]
+            med_tmpP2 = med_tmp[,"P"]
+        }
+        
+         
+        
+        ind_filter = which(abs(tmpP) >= C_sel)
+        ind_filter2 = which(abs(med_tmpP) >= C_sel)
+        
+        if(length(ind_filter)==0 & length(ind_filter2)==0){next}
+        
+            tmpSNP=tmp[ind_filter,"SNP"]
+        med_SNP=med_tmp[ind_filter2,"SNP"]
+       
+      union_SNP=union(tmpSNP,med_SNP)
+        X_sig=c(X_sig,tmpSNP)
+        M_sig=c(M_sig,med_SNP)
+        
+        
+         ind_filter_tmp=which(tmp$SNP%in%union_SNP)
+        ind_filter_med=which(med_tmp$SNP%in%union_SNP)
+        tmp = tmp[ind_filter_tmp,]
+        tmp = as.data.frame(tmp)
+        med_tmp = med_tmp[ind_filter_med,]
+        med_tmp = as.data.frame(med_tmp)
+        tmpSE = tmp[,"SE"]
+        med_tmpSE=med_tmp[,"SE"]
+        # change pval for sigma-based clumping
+             if(indep.method == "clumping") {
+                tmp$P = tmpP2[ind_filter_tmp]
+            } else {
+              tmpSE=tmpSE^2/mean(tmpSE^2)
+                tmp$P = 1/(1 + exp(-tmpSE)) - 0.5
+            }
+      
+            if(indep.method == "clumping") {
+                med_tmp$P = med_tmpP2[ind_filter_med]
+            } else {
+               med_tmpSE=med_tmpSE^2/mean(med_tmpSE^2)
+                med_tmp$P = 1/(1 + exp(-med_tmpSE)) - 0.5
+            }
+  
+        med_tmp=med_tmp[match( tmp$SNP,med_tmp$SNP), ] 
+        tmp$BETAM=med_tmp$BETA
+        tmp$SEM=med_tmp$SE
+        tmp$PM=med_tmp$P
+        tmp$ZM=med_tmp$Z
+        tmp_new= mutate(tmp, index1 = PM<P)
+        tmp_M=tmp_new[tmp_new$index1==TRUE,c("CHR","POS","SNP","A1","A2","ZM","BETAM","SEM","PM","N")]
+          tmp_X=tmp_new[tmp_new$index1==FALSE,c("CHR","POS","SNP","A1","A2","Z","BETA","SE","P","N")]
+          colnames(tmp_M)=c("CHR","POS","SNP","A1","A2","Z","BETA","SE","P","N")
+          ref_all=rbind(tmp_M,tmp_X)
+          ref_all=ref_all[match( med_tmp$SNP,ref_all$SNP), ] 
+          cat("Combind Exposure and Mediator with smallest p-value.\n")
+         
+      
+          
+        tmp.ssfile = paste0(tmpdir,exposure.id,"_ss_CHR",chr.id,".txt")
+        #   med_tmp.ssfile = paste0(med_tmpdir,mediator.id,"_ss_CHR",chr.id,".txt")
+        write.table(ref_all,file = tmp.ssfile,quote=FALSE,row.names=FALSE,col.names=TRUE)
+        # write.table(med_tmp,file = med_tmp.ssfile,quote=FALSE,row.names=FALSE,col.names=TRUE)
+        SNP_list= ref_all$SNP
+  #  med_SNP=med_tmp$SNP    
+        write.table( SNP_list,file = tmp.snp.file,quote=FALSE,row.names=FALSE,col.names=FALSE)
+   #        write.table( med_SNP,file = med_tmp.snp.file,quote=FALSE,row.names=FALSE,col.names=FALSE)
+        system(paste0("C:\\Users\\25110\\Desktop\\tmp\\plink --silent --bfile ",refpanel,chr.id,  " --chr ", chr.id," --extract ", tmp.snp.file," --make-bed --out ",tmpdir,exposure.id,"_CHR",chr.id))
+    #  system(paste0("C:\\Users\\25110\\Desktop\\tmp\\plink --silent --bfile ",refpanel,chr.id,  " --chr ", chr.id," --extract ", med_tmp.snp.file," --make-bed --out ",med_tmpdir,mediator.id,"_CHR",chr.id))
+        
+        if(indep.method == "prunning.org") {
+            command = paste0("C:\\Users\\25110\\Desktop\\tmp\\plink --silent --bfile ",tmpdir,exposure.id,"_CHR",chr.id, "  --indep-pairwise 10000 100 0.001 --out ",tmpdir,exposure.id,"_CHR",chr.id)
+            system(command)
+             pruned.file = paste0(tmpdir,exposure.id,"_CHR",chr.id,".prune.in")
+     #         command = paste0("C:\\Users\\25110\\Desktop\\tmp\\plink --silent --bfile ",med_tmpdir,mediator.id,"_CHR",chr.id, "  --indep-pairwise 10000 100 0.001 --out ",med_tmpdir,mediator.id,"_CHR",chr.id)
+      #      system(command)
+            } else {
+            #clumping
+            command <- paste("C:\\Users\\25110\\Desktop\\tmp\\plink --silent --bfile ",tmpdir,exposure.id,"_CHR",chr.id, " --clump ", tmp.ssfile, "  --clump-p1 1 --clump-kb 10000 --clump-r2 0.001  --clump-snp-field SNP --clump-field P --out ", tmpdir,exposure.id,"_CHR",chr.id, sep = "")
+            system(command)
+            pruned.file = paste(tmpdir,exposure.id,"_CHR",chr.id, ".clumped", sep = "")
+       #      command <- paste("C:\\Users\\25110\\Desktop\\tmp\\plink --silent --bfile ",med_tmpdir,mediator.id,"_CHR",chr.id, " --clump ", med_tmp.ssfile, "  --clump-p1 1 --clump-kb 10000 --clump-r2 0.001  --clump-snp-field SNP --clump-field P --out ", med_tmpdir,mediator.id,"_CHR",chr.id, sep = "")
+        #    system(command)
+         #   med_pruned.file = paste(med_tmpdir,mediator.id,"_CHR",chr.id, ".clumped", sep = "")
+        }
+#pruned for exposure and pruned for mediator should be the same.
+        if(file.exists(pruned.file)) {
+           
+            if(indep.method == "prunning.org") {
+                pruned.snp = fread(pruned.file,header=FALSE)
+                pruned.snp = as.data.frame(pruned.snp)
+                pruned.snp = pruned.snp[,1]
+                pruned = c(pruned,pruned.snp)
+                cat("CHR", chr.id, " pruned SNP for exposure:", length(pruned.snp),"\n")
+               
+            } else {
+                pruned.snp = fread(pruned.file)
+                pruned.snp = as.data.frame(pruned.snp)
+                
+                pruned = c(pruned,pruned.snp[,"SNP"])
+                cat("CHR", chr.id, " pruned SNP for exposure:", dim(pruned.snp)[1],"\n")
+             
+            }
+        }
+        
+          #if(file.exists(med_pruned.file)) {
+           
+           # if(indep.method == "prunning.org") {
+            #    med_pruned.snp = fread(med_pruned.file,header=FALSE)
+             #   med_pruned.snp = as.data.frame(med_pruned.snp)
+              #  med_pruned.snp = med_pruned.snp[,1]
+               # med_pruned = c(med_pruned,med_pruned.snp)
+                #cat("CHR", chr.id, " pruned SNP for mediator:", length(med_pruned.snp),"\n")
+               
+            #} else {
+             #   med_pruned.snp = fread(med_pruned.file)
+              #  med_pruned.snp = as.data.frame(med_pruned.snp)
+                
+               # med_pruned = c(med_pruned,med_pruned.snp[,"SNP"])
+                #cat("CHR", chr.id, " pruned SNP mediator:", dim(med_pruned.snp)[1],"\n")
+             
+            #}
+      #  }
+    }
+    
+    exp_dat = dat %>% filter((SNP %in% pruned)&(SNP%in%X_sig))
+    if(dim(exp_dat)[1]<3) {
+        print("No enough SNPs for first step")
+        return(NULL)
+    } else {
+        
+        exp_dat$id = exposure.id
+        if(!"EAF" %in% colnames(exp_dat)) {
+            exp_dat$EAF = NA
+        }
+    
+        exp_dat = exp_dat[,c("POS","CHR","SE","BETA","N","id","SNP","A1","A2","EAF")]
+        
+        exp_dat$exposure = exposure.id
+        
+        colnames(exp_dat) = c("pos.exposure","chr.exposure","se.exposure","beta.exposure","samplesize.exposure","id.exposure","SNP","effect_allele.exposure","other_allele.exposure","eaf.exposure","exposure")
+        
+        
+        cat("Finish extracting exposure data\n")
+        
+        #####################################################
+        # Step 2: combine with the outcome GWAS dataset
+        #####################################################
+   
+        #should be the same as single dataset 
+             
+        outcome_dat =  mediatordat[ mediatordat[,"SNP"]%in% exp_dat$SNP,]
+        
+        outcome_dat$id.outcome = mediator.id
+        outcome_dat$outcome = mediator.id
+        
+        if(!"EAF" %in% colnames(outcome_dat)) {
+            outcome_dat$EAF = NA
+        }
+        outcome_dat = outcome_dat[, c("id.outcome","outcome","BETA","SE","A1","A2","P","EAF","N","SNP","CHR","POS")]
+        
+        colnames(outcome_dat) = c("id.outcome","outcome","beta.outcome","se.outcome","effect_allele.outcome","other_allele.outcome","pval.outcome","eaf.outcome","samplesize.outcome","SNP","chr","pos")
+        
+ 
+        harmonsze_dat = harmonise_data(exposure_dat = exp_dat, outcome_dat = outcome_dat)#
+        harmonsze_dat = harmonsze_dat[harmonsze_dat[,"mr_keep"],]
+        
+        MR_datall = harmonsze_dat
+        
+        ########################################
+        # Step 3: conduct analysis
+        ########################################
+        b_exp = harmonsze_dat$beta.exposure
+        b_out = harmonsze_dat$beta.outcome
+        se_exp = harmonsze_dat$se.exposure
+        se_out = harmonsze_dat$se.outcome
+        nx = floor(median(harmonsze_dat$samplesize.exposure))
+        ny = floor(median(harmonsze_dat$samplesize.outcome))
+       MR_IVW_first_step = TwoSampleMR::mr_ivw(b_exp = b_exp,b_out = b_out,
+        se_exp = se_exp,se_out = se_out)
+    }
+       
+       
+   # exp_dat = mediatordat %>% filter((SNP %in%med_pruned))
+    exp_dat = mediatordat %>% filter((SNP %in%pruned)&(SNP%in%M_sig)&(!SNP%in%X_sig))
+    
+    if(dim(exp_dat)[1]<3) {
+      print("No enough SNPs for second step")
+        return(NULL)
+    } else {
+        
+        exp_dat$id = mediator.id
+        if(!"EAF" %in% colnames(exp_dat)) {
+            exp_dat$EAF = NA
+        }
+    
+        exp_dat = exp_dat[,c("POS","CHR","SE","BETA","N","id","SNP","A1","A2","EAF")]
+        
+        exp_dat$exposure = mediator.id
+        
+        colnames(exp_dat) = c("pos.exposure","chr.exposure","se.exposure","beta.exposure","samplesize.exposure","id.exposure","SNP","effect_allele.exposure","other_allele.exposure","eaf.exposure","exposure")
+        
+        
+        cat("Finish extracting mediator data\n")
+        
+        #####################################################
+        # Step 2: combine with the outcome GWAS dataset
+        #####################################################
+   
+        #should be the same as single dataset 
+             
+        outcome_dat =  outcomedat[ outcomedat[,"SNP"]%in% exp_dat$SNP,]
+        
+        outcome_dat$id.outcome = outcome.id
+        outcome_dat$outcome = outcome.id
+        
+        if(!"EAF" %in% colnames(outcome_dat)) {
+            outcome_dat$EAF = NA
+        }
+        outcome_dat = outcome_dat[, c("id.outcome","outcome","BETA","SE","A1","A2","P","EAF","N","SNP","CHR","POS")]
+        
+        colnames(outcome_dat) = c("id.outcome","outcome","beta.outcome","se.outcome","effect_allele.outcome","other_allele.outcome","pval.outcome","eaf.outcome","samplesize.outcome","SNP","chr","pos")
+        
+ 
+        harmonsze_dat = harmonise_data(exposure_dat = exp_dat, outcome_dat = outcome_dat)#
+        harmonsze_dat = harmonsze_dat[harmonsze_dat[,"mr_keep"],]
+        
+        MR_datall_second = harmonsze_dat
+        
+        ########################################
+        # Step 3: conduct analysis
+        ########################################
+        b_exp = harmonsze_dat$beta.exposure
+        b_out = harmonsze_dat$beta.outcome
+        se_exp = harmonsze_dat$se.exposure
+        se_out = harmonsze_dat$se.outcome
+        nx = floor(median(harmonsze_dat$samplesize.exposure))
+        ny = floor(median(harmonsze_dat$samplesize.outcome))
+       MR_IVW_second_step = TwoSampleMR::mr_ivw(b_exp = b_exp,b_out = b_out,
+        se_exp = se_exp,se_out = se_out)
+       
+        return(list(res_first = MR_IVW_first_step, MRdatstep1 = MR_datall,res_second= MR_IVW_second_step, MRdatstep2 = MR_datall_second))
+    }
+    
+}
+```
+
+
+```{r,echo=FALSE,include = FALSE}
+Mediation_analysis<-function(exposure,mediator,outcome)
+{MVMR_result=MR_MVMRbase(exposure,mediator,outcome,sel.pthr = 5e-8,indep.method = "prunning.org")
+Proposed_rerandom=MR_proposed(exposure,mediator,outcome,sel.pthr = 5e-5,indep.method = "prunning.org")
+if(is.null(MVMR_result)|is.null(Proposed_rerandom))
+{print("No enough SNPs for proposed methods")
+  return(NULL)}else{p_tau=pnorm(abs(Proposed_rerandom$res$tauRIVW/Proposed_rerandom$res$tause),lower.tail=F) * 2
+p_theta=pnorm(abs(Proposed_rerandom$res$thetaRIVW/Proposed_rerandom$res$thetase),lower.tail=F) * 2
+p_tauy=pnorm(abs(Proposed_rerandom$res$tauyRIVW/Proposed_rerandom$res$tauyse),lower.tail=F) * 2
+p_taux=pnorm(abs(Proposed_rerandom$res$tauxRIVW/Proposed_rerandom$res$tauxse),lower.tail=F) * 2
+num_Sx=nrow(Proposed_rerandom$MRdatXrandom)
+num_Sm=nrow(Proposed_rerandom$MRdatMrandom)
+a=c(Proposed_rerandom$res$tauRIVW,Proposed_rerandom$res$thetaRIVW,Proposed_rerandom$res$tauyRIVW,Proposed_rerandom$res$tauxRIVW,"Proposed",num_Sx,num_Sm)
+b=c(Proposed_rerandom$res$tause,Proposed_rerandom$res$thetase,Proposed_rerandom$res$tauyse,Proposed_rerandom$res$tauxse,"Proposed",num_Sx,num_Sm)
+c=c(p_tau,p_theta,p_tauy,p_taux,"Proposed",num_Sx,num_Sm)
+Proposed_result=data.frame(rbind(a,b,c))
+colnames(Proposed_result)=c("tau","theta","tauy","taux","group","nsnpX","nsnpM")
+rownames(Proposed_result)=c("coeff","SE","P-val")
+}
+MR_total=MR_total_effect(exposure,mediator,outcome,indep.method = "prunning.org")
+MR_two_step=MR_2step(exposure,mediator,outcome,indep.method = "prunning.org")
+vector_C=c(MR_two_step$res_first$b,MR_two_step$res_second$b)
+if(is.null(vector_C)|is.null(MR_total)|is.null(MR_two_step))
+{print("No enough SNPs for two step MR or MR total")
+  return(NULL)}else{
+sub_variance_matrix=matrix(c(MR_two_step$res_first$se^2,0,0,MR_two_step$res_second$se^2),byrow=TRUE,nrow=2,ncol=2)
+sd_tau=msm::deltamethod(~ x1*x2,vector_C,sub_variance_matrix)
+two_step_ptau=pnorm(abs(MR_two_step$res_first$b*MR_two_step$res_second$b/sd_tau),lower.tail=F) * 2
+n_first=nrow(MR_two_step$MRdatstep1)
+n_second=nrow(MR_two_step$MRdatstep2)
+a=c(MR_two_step$res_first$b*MR_two_step$res_second$b,MR_total$res$b-MR_two_step$res_first$b*MR_two_step$res_second$b,MR_two_step$res_second$b,MR_two_step$res_first$b,"Two Step",n_first,n_second)
+b=c(sd_tau,NA,MR_two_step$res_second$se,MR_two_step$res_first$se,"Two Step",n_first,n_second)
+c=c(two_step_ptau,NA,MR_two_step$res_second$pval,MR_two_step$res_first$pval,"Two Step",n_first,n_second)
+Two_Step_result=data.frame(rbind(a,b,c))
+colnames(Two_Step_result)=c("tau","theta","tauy","taux","group","nsnpX","nsnpM")
+rownames(Two_Step_result)=c("coeff","SE","P-val")
+#pnorm(abs(Proposed_rerandom$res$tauRIVW/Proposed_rerandom$res$tause),lower.tail=F) * 2
+## difference se
+overlap_set=MR_total$MRdat[MR_total$MRdat$SNP%in%MVMR_result$MRdat$SNP,]
+cov_hat=1/sum((MR_total$MRdat$beta.exposure^2)/MR_total$MRdat$se.outcome^2)*(sum(MVMR_result$MRdat$beta.mediator^2/MVMR_result$MRdat$se.outcome^2)*sum((MR_total$MRdat$beta.outcome*MR_total$MRdat$beta.exposure-MR_total$res$b*MR_total$MRdat$beta.exposure^2)*(MR_total$MRdat$beta.outcome*MR_total$MRdat$beta.exposure-MVMR_result$res[1,1]*MR_total$MRdat$beta.exposure^2-MVMR_result$res[2,1]*MR_total$MRdat$beta.exposure*MR_total$MRdat$beta.mediator)/MR_total$MRdat$se.outcome^4)-sum(MVMR_result$MRdat$beta.mediator*MVMR_result$MRdat$beta.exposure/MVMR_result$MRdat$se.outcome^2)*sum((MR_total$MRdat$beta.outcome*MR_total$MRdat$beta.exposure-MR_total$res$b*MR_total$MRdat$beta.exposure^2)*(MR_total$MRdat$beta.outcome*MR_total$MRdat$beta.mediator-MVMR_result$res[2,1]*MR_total$MRdat$beta.mediator^2-MVMR_result$res[1,1]*MR_total$MRdat$beta.mediator*MR_total$MRdat$beta.exposure)/MR_total$MRdat$se.outcome^4))*1/(sum((MVMR_result$MRdat$beta.mediator^2)/MVMR_result$MRdat$se.outcome^2)*sum((MVMR_result$MRdat$beta.exposure^2)/MVMR_result$MRdat$se.outcome^2)-(sum(MVMR_result$MRdat$beta.mediator*MVMR_result$MRdat$beta.exposure/MVMR_result$MRdat$se.outcome^2))^2)
+  cov_hat2=1/sum((MR_total$MRdat$beta.exposure^2)/MR_total$MRdat$se.outcome^2)*(sum(MVMR_result$MRdat$beta.mediator^2/MVMR_result$MRdat$se.outcome^2)*sum((MR_total$MRdat$beta.exposure^2-MR_total$MRdat$se.exposure^2)*(MR_total$MRdat$se.outcome^2+MR_total$res$b*MVMR_result$res[1,1]*MR_total$MRdat$se.exposure^2)/MR_total$MRdat$se.outcome^4+(2*MR_total$res$b*MVMR_result$res[1,1]*MR_total$MRdat$se.exposure^4)/MR_total$MRdat$se.outcome^4+MR_total$MRdat$se.exposure^2/MR_total$MRdat$se.outcome^2)-sum(MVMR_result$MRdat$beta.mediator*MVMR_result$MRdat$beta.exposure/MVMR_result$MRdat$se.outcome^2)*sum(MR_total$MRdat$beta.exposure*MR_total$MRdat$beta.mediator*(MR_total$MRdat$se.outcome^2+MR_total$res$b*MVMR_result$res[1,1]*MR_total$MRdat$se.exposure^2)/MR_total$MRdat$se.outcome^4))*1/(sum((MVMR_result$MRdat$beta.mediator^2)/MVMR_result$MRdat$se.outcome^2)*sum((MVMR_result$MRdat$beta.exposure^2)/MVMR_result$MRdat$se.outcome^2)-(sum(MVMR_result$MRdat$beta.mediator*MVMR_result$MRdat$beta.exposure/MVMR_result$MRdat$se.outcome^2))^2)
+
+sd_difference=sqrt(MR_total$res$se^2+MVMR_result$res[1,2]^2-2*cov_hat)
+p_difference=pnorm(abs((MR_total$res$b-MVMR_result$res[1,1])/sd_difference),lower.tail=F) * 2
+
+n_total=nrow(MR_total$MRdat)
+n_mvmr=nrow(MVMR_result$MRdat)
+a=c((MR_total$res$b-MVMR_result$res[1,1]),MVMR_result$res[1,1],MVMR_result$res[2,1],NA,"Diff",n_total,n_mvmr)
+b=c(sd_difference,MVMR_result$res[1,2],MVMR_result$res[2,2],NA,"Diff",n_total,n_mvmr)
+c=c(p_difference,MVMR_result$res[1,4],MVMR_result$res[2,4],NA,"Diff",n_total,n_mvmr)
+Diff_result=data.frame(rbind(a,b,c))
+colnames(Diff_result)=c("tau","theta","tauy","taux","group","nsnpX","nsnpM")
+rownames(Diff_result)=c("coeff","SE","P-val")
+Result=rbind(Proposed_result,Two_Step_result,Diff_result)
+print(Result)
+print(paste0("The exposure is",exposure,"\n"),)
+print(paste0("The mediator is",mediator,"\n"))
+print(paste0("The outcome is",outcome,"\n"))
+return(Result)
+}
+}
+```
+
+
+# Cholesterol
+
+
+```{r}
+pvalue_list_proposed=c()
+pvalue_list_2step=c()
+pvalue_list_diff=c()
+```
+##bmi->Pure hypercholesterolaemia->CAD
+
+exposure.id:ieu-b-40
+mediator.id:ukb-b-12651
+outcome.id:ieu-a-8
+```{r,echo=FALSE,include = FALSE}
+result=Mediation_analysis("ieu-b-40","ukb-b-12651","ieu-a-8")
+
+```
+
+```{r}
+if(is.null(result))
+{print("No enough SNPs for results ")
+  pvalue_list_proposed=c(pvalue_list_proposed,1)
+pvalue_list_2step=c(pvalue_list_2step,1)
+pvalue_list_diff=c(pvalue_list_diff,1)}else{
+result[,1:4]=round(apply(result[,1:4],2,as.numeric),3)
+print(result)
+pvalue_list_proposed=c(pvalue_list_proposed,result$tau[3])
+pvalue_list_2step=c(pvalue_list_2step,result$tau[6])
+pvalue_list_diff=c(pvalue_list_diff,result$tau[9])}
+```
+
+## BMI->LDL ->CAD
+
+exposure.id:ieu-b-40
+mediator.id:ieu-b-110
+outcome.id:ieu-a-8
+
+
+```{r,echo=FALSE,include = FALSE}
+result=Mediation_analysis("ieu-b-40","ieu-b-110","ieu-a-8")
+
+```
+```{r}
+if(is.null(result))
+{print("No enough SNPs for results ")
+  pvalue_list_proposed=c(pvalue_list_proposed,1)
+pvalue_list_2step=c(pvalue_list_2step,1)
+pvalue_list_diff=c(pvalue_list_diff,1)}else{
+result[,1:4]=round(apply(result[,1:4],2,as.numeric),3)
+print(result)
+pvalue_list_proposed=c(pvalue_list_proposed,result$tau[3])
+pvalue_list_2step=c(pvalue_list_2step,result$tau[6])
+pvalue_list_diff=c(pvalue_list_diff,result$tau[9])}
+```
+
+## BMI->HDL->CAD
+
+exposure.id:ieu-b-40
+mediator.id:ieu-a-299
+outcome.id:ieu-a-8
+
+```{r,echo=FALSE,include = FALSE }
+result=Mediation_analysis("ieu-b-40","ieu-b-109","ieu-a-8")
+```
+
+```{r}
+if(is.null(result))
+{print("No enough SNPs for results ")
+  pvalue_list_proposed=c(pvalue_list_proposed,1)
+pvalue_list_2step=c(pvalue_list_2step,1)
+pvalue_list_diff=c(pvalue_list_diff,1)}else{
+result[,1:4]=round(apply(result[,1:4],2,as.numeric),3)
+print(result)
+pvalue_list_proposed=c(pvalue_list_proposed,result$tau[3])
+pvalue_list_2step=c(pvalue_list_2step,result$tau[6])
+pvalue_list_diff=c(pvalue_list_diff,result$tau[9])}
+```
+
+# Blood Pressure
+
+## BMI->SBP->CAD
+
+exposure.id:ieu-b-40
+mediator.id:ukb-b-20175
+outcome.id:ieu-a-8
+
+```{r,echo=FALSE,include = FALSE}
+result=Mediation_analysis("ieu-b-40","ukb-b-20175","ieu-a-8")
+
+```
+```{r}
+if(is.null(result))
+{print("No enough SNPs for results ")
+  pvalue_list_proposed=c(pvalue_list_proposed,1)
+pvalue_list_2step=c(pvalue_list_2step,1)
+pvalue_list_diff=c(pvalue_list_diff,1)}else{
+result[,1:4]=round(apply(result[,1:4],2,as.numeric),3)
+print(result)
+pvalue_list_proposed=c(pvalue_list_proposed,result$tau[3])
+pvalue_list_2step=c(pvalue_list_2step,result$tau[6])
+pvalue_list_diff=c(pvalue_list_diff,result$tau[9])}
+```
+
+
+## BMI->DBP->CAD
+
+exposure.id:ieu-b-40
+mediator.id:ukb-b-7992
+outcome.id:ieu-a-8
+
+```{r,echo=FALSE,include = FALSE }
+result=Mediation_analysis("ieu-b-40","ukb-b-7992","ieu-a-8")
+
+```
+
+```{r}
+if(is.null(result))
+{print("No enough SNPs for results ")
+  pvalue_list_proposed=c(pvalue_list_proposed,1)
+pvalue_list_2step=c(pvalue_list_2step,1)
+pvalue_list_diff=c(pvalue_list_diff,1)}else{
+result[,1:4]=round(apply(result[,1:4],2,as.numeric),3)
+print(result)
+pvalue_list_proposed=c(pvalue_list_proposed,result$tau[3])
+pvalue_list_2step=c(pvalue_list_2step,result$tau[6])
+pvalue_list_diff=c(pvalue_list_diff,result$tau[9])}
+```
+
+
+
+
+# Negative Control
+
+## BMI->Hair Color(Blonde) ->CAD
+
+exposure.id:ieu-b-40
+mediator.id:ukb-d-1747_1
+outcome.id:ieu-a-8
+
+```{r,echo=FALSE,include = FALSE }
+result=Mediation_analysis("ieu-b-40","ukb-d-1747_1","ieu-a-8")
+```
+
+```{r}
+if(is.null(result))
+{print("No enough SNPs for results ")
+  pvalue_list_proposed=c(pvalue_list_proposed,1)
+pvalue_list_2step=c(pvalue_list_2step,1)
+pvalue_list_diff=c(pvalue_list_diff,1)}else{
+result[,1:4]=round(apply(result[,1:4],2,as.numeric),3)
+print(result)
+pvalue_list_proposed=c(pvalue_list_proposed,result$tau[3])
+pvalue_list_2step=c(pvalue_list_2step,result$tau[6])
+pvalue_list_diff=c(pvalue_list_diff,result$tau[9])}
+```
+
+## BMI->Hair Color(Red) ->CAD
+
+exposure.id:ieu-b-40
+mediator.id:ukb-d-1747_2
+outcome.id:ieu-a-8
+
+```{r,echo=FALSE,include = FALSE }
+result=Mediation_analysis("ieu-b-40","ukb-d-1747_2","ieu-a-8")
+```
+
+```{r}
+if(is.null(result))
+{print("No enough SNPs for results ")
+  pvalue_list_proposed=c(pvalue_list_proposed,1)
+pvalue_list_2step=c(pvalue_list_2step,1)
+pvalue_list_diff=c(pvalue_list_diff,1)}else{
+result[,1:4]=round(apply(result[,1:4],2,as.numeric),3)
+print(result)
+pvalue_list_proposed=c(pvalue_list_proposed,result$tau[3])
+pvalue_list_2step=c(pvalue_list_2step,result$tau[6])
+pvalue_list_diff=c(pvalue_list_diff,result$tau[9])}
+```
+# Blood Glucose
+
+
+
+
+## BMI->Fasting Glu->CAD
+
+exposure.id:ieu-b-40
+mediator.id:ieu-b-113
+outcome.id:ieu-a-8
+
+```{r,echo=FALSE,include = FALSE}
+result=Mediation_analysis("ieu-b-40","ieu-b-113","ieu-a-8")
+```
+
+```{r}
+if(is.null(result))
+{print("No enough SNPs for results ")
+  pvalue_list_proposed=c(pvalue_list_proposed,1)
+pvalue_list_2step=c(pvalue_list_2step,1)
+pvalue_list_diff=c(pvalue_list_diff,1)}else{
+result[,1:4]=round(apply(result[,1:4],2,as.numeric),3)
+print(result)
+pvalue_list_proposed=c(pvalue_list_proposed,result$tau[3])
+pvalue_list_2step=c(pvalue_list_2step,result$tau[6])
+pvalue_list_diff=c(pvalue_list_diff,result$tau[9])}
+```
+
+## Conduct BH procedure
+```{r}
+library(stats)
+print("conducting BH procedure for proposed p value")
+mediator=c("Pure hypercholesterolaemia","LDL","HDL","SBP","DBP","Hair Color(Blonde)","Hair Color(red)","Fasting Glu")
+p_adjust_proposed=p.adjust(pvalue_list_proposed,method="BH",n=length(pvalue_list_proposed))
+p_adjust_2step=p.adjust(pvalue_list_2step,method="BH",n=length(pvalue_list_2step))
+p_adjust_diff=p.adjust(pvalue_list_diff,method="BH",n=length(pvalue_list_diff))
+adjust_result=as.data.frame(rbind(mediator,p_adjust_proposed,p_adjust_2step,p_adjust_diff))
+rownames(adjust_result)=c("mediator","pval.adj.proposed","pval.adj.2step","pval.adj.diff")
+print(adjust_result)
+```
+
+
+
+
+
