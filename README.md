@@ -32,7 +32,7 @@ We provide an R package [MR.Rerand](https://github.com/LQRrrrr/MR.Rerand) to imp
 - Mediation_analysis_real_data_markdown.md: The Rmarkdown to conduct all real data analysis, for interested causal pathways, please modify the data source and the interested traits to run smoothly. In `Mediation_analysis` function, input indep.method = "prunning.org" to conduct LD pruning, input indep.method = "clumping" to conduct LD clumping, input  input indep.method = "revised_pruning" to conduct sigmabased_pruning.
 ### Folder: ldclumping
 #### Real data results using LD clumping to select independent SNPs, which may also induce selection bias
-- bmimedaisstroke.html: Mediation pathway is Body Mass Index -> Mediato r-> Any ischemic (AIS) stroke 
+- bmimedaisstroke.html: Mediation pathway is Body Mass Index -> Mediator-> Any ischemic (AIS) stroke 
 - BMIMEDStroke.html: Mediation pathway is Body Mass Index -> Mediator -> Stroke
 - Mediation_analysis_real_data_markdown.html: Mediation pathway is Body Mass Index -> Mediator -> Cadiovascular Disease (CAD)
 - obesitymedaisstroke.html: Mediation pathway is Obesity -> Mediator -> AIS stroke
@@ -58,7 +58,7 @@ We provide an R package [MR.Rerand](https://github.com/LQRrrrr/MR.Rerand) to imp
 - WHRMEDaisstroke.html: Mediation pathway is Waist-Hip ratio (WHP) -> Mediator -> AIS stroke
 - WHRMEDStroke.html: Mediation pathway is Waist-Hip ratio (WHP) -> Mediator -> Stroke
 
-Our real data are extracted from [IEU Open GWAS project](https://gwas.mrcieu.ac.uk/) and [MEGASTROKE](https://megastroke.org/) database. The GWAS ID we use are summarized as follows.
+Our real data are extracted from [IEU Open GWAS project](https://gwas.mrcieu.ac.uk/) and [MEGASTROKE](https://megastroke.org/) database. The Exposure / Mediator / Outcome GWAS ID we use are summarized as follows.
 
 <figure>
   <img src="figures/datasource.png" alt="Example Image">
