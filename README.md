@@ -62,6 +62,6 @@ Our real data are extracted from [IEU Open GWAS project](https://gwas.mrcieu.ac.
 
 <figure>
   <img src="figures/datasource.png" alt="Example Image">
-  <figcaption>Causal Diagram for Mediation Analysis.</figcaption>
+  <figcaption>Data source in real data analysis.</figcaption>
 </figure>
 
