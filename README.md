@@ -65,3 +65,9 @@ Our real data are extracted from [IEU Open GWAS project](https://gwas.mrcieu.ac.
   <figcaption>Data source in real data analysis.</figcaption>
 </figure>
 
+## References
+
+- Ma, X., Wang, J., and Wu, C. (2023a). “Breaking the winner’s curse in Mendelian randomization: rerandomized inverse variance weighted estimator,” Annals of Statistics, 51 (1), 211–232.
+
+- Lyu, R. Q., Wu, C., Ma, X., and Wang, J. (2023). Mediation Analysis with Mendelian Randomization and Efficient Multiple GWAS Integration. arXiv preprint arXiv:2312.10563.
+
