@@ -21,7 +21,7 @@ We provide an R package [MR.Rerand](https://github.com/LQRrrrr/MR.Rerand) to imp
   <figcaption>Causal Diagram for Mediation Analysis.</figcaption>
 </figure>
 
-## Function Value Contour.ipynb: Provide the function contour in Supplementary Material
+- Function Value Contour.ipynb: Provide the function contour in Supplementary Material
 
 ## Simulation
 - Summary_result_plot_optimal.R: Produce Figure in Figure 2-4 in the manuscript
